@@ -1,0 +1,10 @@
+/data/slices/062_slice_9.h5
+/data/slices/045_slice_14.h5
+/data/slices/067_slice_9.h5
+/data/slices/061_slice_15.h5
+/data/slices/016_slice_16.h5
+/data/slices/027_slice_12.h5
+/data/slices/043_slice_18.h5
+/data/slices/033_slice_15.h5
+/data/slices/074_slice_18.h5
+/data/slices/020_slice_5.h5

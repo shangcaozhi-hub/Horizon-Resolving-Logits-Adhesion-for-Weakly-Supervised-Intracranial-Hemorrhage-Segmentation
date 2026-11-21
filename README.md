@@ -59,7 +59,15 @@ For a full INSTANCE list, replace `joytest.txt` with your list relative to the d
 
 ## Train on RSNA
 
-Split by patient. Clip CT slices to 0-100 HU, min-max normalize them and save grayscale PNGs in `data/RSNA/pngs/`. In `data/RSNA/lists/train.csv`, use a header row followed by the image stem and binary hemorrhage label (for example, `ID_001,1`).
+Keep all slices from a patient in the same split. Clip CT intensities to 0-100 HU, apply min-max normalization and save one grayscale PNG per slice in `data/RSNA/pngs/`. In `data/RSNA/lists/train.csv`, the first two columns give the image stem and the slice-level label (1 for any hemorrhage, 0 otherwise).
+
+```csv
+Image,any
+ID_001,1
+ID_002,0
+```
+
+Run the following command from the repository root. The loader augments each training slice and converts it to a 240 x 240 three-channel input.
 
 ```sh
 python train.py --model horizon_spol --images data/RSNA/pngs --lists data/RSNA/lists --output runs/horizon_spol
@@ -72,4 +80,6 @@ Horizon trains from scratch with AdamW and a batch size of 48. Each stage starts
 | 1-10 | Slice classification | 5e-4 | 5e-5 |
 | 11-30 | Classification, prototype contrast, cross-view consistency and self-distillation | 5e-5 | 1e-5 |
 
-Use `--model horizon_swin` for the Swin backbone. To continue a run, add `--resume runs/horizon_spol/epoch-005.pth` with the path to your saved checkpoint.
+During the first ten epochs, the classifier learns to detect hemorrhage from slice labels while the model builds its prototype bank. Joint training then uses the augmented slice and a flipped copy as its two views. Their prototype activation maps guide the classifier toward consistent lesion responses across views.
+
+For the Swin backbone, use `--model horizon_swin` and a separate output directory. The trainer saves a checkpoint after each epoch. To continue from epoch 6, rerun the command above with `--resume runs/horizon_spol/epoch-005.pth`. This restores the model, optimizer and prototype bank.

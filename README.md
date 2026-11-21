@@ -59,7 +59,9 @@ For a full INSTANCE list, replace `joytest.txt` with your list relative to the d
 
 ## Train on RSNA
 
-**1. Prepare RSNA.** Use the RSNA 2019 intracranial hemorrhage dataset. Split by patient (70% training, 30% classification validation). Clip CT intensities to 0-100 HU, min-max normalize and save one grayscale PNG per slice in `data/RSNA/pngs/`. In `data/RSNA/lists/train.csv`, list only training slices. The first column is the filename without `.png`; the second is 1 if any hemorrhage subtype is present and 0 otherwise.
+**1. Prepare the training slices.** Start with preprocessed RSNA 2019 head CT slices. If your slices are already grayscale JPGs, save a PNG copy of each decoded image in `data/RSNA/pngs/` with the same filename stem (e.g., `ID_001.jpg` becomes `ID_001.png`). The training loader looks for `<stem>.png`. Use existing preprocessed PNGs directly.
+
+Split by patient (70% training, 30% classification validation). In `data/RSNA/lists/train.csv`, list only training slices. The first column is the filename stem and the second is 1 if any hemorrhage subtype is present and 0 otherwise.
 
 ```csv
 Image,any
@@ -83,18 +85,8 @@ Horizon starts from random weights. It trains with AdamW and batches of 48 slice
 
 For the other rows of [Table 2](#results-reported-in-the-manuscript), set `--model` to `horizon_swin`, `spol` or `swin_mil`. The two baselines use classification throughout. Give each model and seed its own output directory. The trainer saves `epoch-NNN.pth` after every epoch. To continue the example from epoch 6, add `--resume runs/horizon_spol/seed42/epoch-005.pth`.
 
-**3. Evaluate on INSTANCE and BHSD.** Supply the full datasets and patient-level split lists in the [inference formats above](#other-inference-inputs). The following example exports raw CAMs using the final Horizon-SPOL checkpoint. Use the same checkpoint for all three commands and a new output directory for each export.
+**3. Evaluate on the held-out test sets.** For each trained model, select the CAM threshold on a separate segmentation validation split with reference masks. Use the same checkpoint and threshold across all test sets. Follow the [inference input formats](#other-inference-inputs) and export raw spatial logits with `--format npz`.
 
-```sh
-python predict.py --model horizon_spol --checkpoint runs/horizon_spol/seed42/epoch-030.pth --data-root data/INSTANCE --list val_slices.txt --format npz --output outputs/seed42/instance-val
-python predict.py --model horizon_spol --checkpoint runs/horizon_spol/seed42/epoch-030.pth --data-root data/INSTANCE --list test_slices.txt --format npz --output outputs/seed42/instance-test
-python predict.py --model horizon_spol --checkpoint runs/horizon_spol/seed42/epoch-030.pth --dataset bhsd --data-root data/BHSD --list data_2D.txt --format npz --output outputs/seed42/bhsd-test
-```
-
-Each NPZ contains the slice identifier (`case`), classification logit (`score`) and raw spatial logits (`cam`). To compare with Table 2:
-
-- **Dice.** Select a CAM threshold on the held-out INSTANCE validation patients (30%). Apply that threshold to the remaining INSTANCE patients and the full BHSD test set. Rectify and max-normalize each slice CAM, resize it to the mask grid and suppress predictions on slices with a negative classification logit. Stack slices in anatomical order and compute Dice per patient. Report the mean patient Dice for each run.
-- **LAI.** On hemorrhage-positive slices, use the reference masks to collect raw spatial logits for lesion and background locations. Estimate the two densities and integrate their pointwise minimum. Report the overlap as a percentage.
-- **Across runs.** Repeat training and evaluation with four distinct seeds per model. Report Dice as the mean and standard deviation of the four run means.
-
-The public repository provides training and CAM export. Exact regeneration of the published table also requires the original patient lists, run-specific checkpoints or model-selection records, and volume-level Dice and LAI evaluation code. The bundled ten-slice joytest is a quick inference check.
+- **Dice.** Rectify and max-normalize each slice CAM, resize it to the reference mask grid and apply the selected threshold. Suppress predictions on slices with a negative classification logit. Stack the slices in anatomical order and compute Dice per patient, then average across patients within each test set.
+- **LAI.** On hemorrhage-positive slices, use the reference masks to collect raw spatial logits for lesion and background locations. Estimate their densities and report the area of overlap as a percentage.
+- **Across runs.** Train and evaluate each model with four distinct seeds. For each test set, report the mean and standard deviation of the four run-level Dice scores.

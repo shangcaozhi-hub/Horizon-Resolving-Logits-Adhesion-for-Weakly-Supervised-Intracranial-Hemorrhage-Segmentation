@@ -10,7 +10,7 @@ def l2_normalize(x):
 
 
 class PrototypeSupportBank(nn.Module):
-    def __init__(self, feat_dim, bank_size, num_classes, num_prototypes, gamma, num_components=3):
+    def __init__(self, feat_dim, bank_size, num_classes, num_prototypes, gamma, num_components=5, foreground_components=5):
         super(PrototypeSupportBank, self).__init__()
         self.feat_dim = feat_dim
         self.bank_size = bank_size
@@ -29,7 +29,7 @@ class PrototypeSupportBank(nn.Module):
             self.init_flag.append(True)
 
             if i == 1:
-                num_component = 1
+                num_component = foreground_components
             else:
                 num_component = num_components
 
@@ -234,7 +234,7 @@ class PrototypeSupportBank(nn.Module):
 
 class PrototypeSwinTransformer(nn.Module):
 
-    def __init__(self, num_prototype=100, num_classes=1, gamma=0.9, threshold=0.8, auxiliary_head=True, bank_size=1000, components=3):
+    def __init__(self, num_prototype=50, num_classes=1, gamma=0.9, threshold=0.8, auxiliary_head=True, bank_size=1000, components=5, foreground_components=5):
         super(PrototypeSwinTransformer, self).__init__()
         self.num_prototype = num_prototype
         self.num_classes = num_classes
@@ -259,7 +259,7 @@ class PrototypeSwinTransformer(nn.Module):
 
         self.feat_norm = nn.LayerNorm(256)
 
-        self.PrototypeSupportBank = PrototypeSupportBank(256, bank_size, num_classes+1, num_prototype, gamma, num_components=components)
+        self.PrototypeSupportBank = PrototypeSupportBank(256, bank_size, num_classes+1, num_prototype, gamma, num_components=components, foreground_components=foreground_components)
         self.n_components = self.PrototypeSupportBank.num_components
     
 
@@ -347,7 +347,7 @@ class PrototypeSwinTransformer(nn.Module):
 
         sampled_protos = self.PrototypeSupportBank.sample_prototypes().to(hie_fea.device).detach()  # c k d
         random_proto_back = self.PrototypeSupportBank.gmm_means_0.unsqueeze(0)
-        global_proto_fore = self.PrototypeSupportBank.gmm_means_1.unsqueeze(0).repeat(1, self.n_components, 1)
+        global_proto_fore = self.PrototypeSupportBank.gmm_means_1.unsqueeze(0).expand(1, self.n_components, -1)
         global_proto = torch.cat([random_proto_back, global_proto_fore], dim=0)
         # proto_fea = rearrange(l2_normalize(self.proj_head(hie_fea)), 'b n d -> (b n) d')
         # sampled_protos = l2_normalize(self.proj_head(sampled_protos))

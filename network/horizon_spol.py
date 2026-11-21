@@ -9,14 +9,14 @@ def l2_normalize(x):
 
 
 class Plug_play(nn.Module):
-    def __init__(self, num_cls=1, num_prototype=50, gamma=0.9, threshold=0.8):
+    def __init__(self, num_cls=1, num_prototype=50, gamma=0.9, threshold=0.8, components=5, foreground_components=5):
         super(Plug_play, self).__init__()
         self.num_cls = num_cls
         self.num_prototype = num_prototype
         self.gamma = gamma
         self.threshold = threshold
 
-        self.backbone = SPOL_pretrain(num_cls, num_prototype, gamma, threshold)
+        self.backbone = SPOL_pretrain(num_cls, num_prototype, gamma, threshold, components, foreground_components)
         self.backbone.test = True
 
         self.mask_norm = nn.LayerNorm(num_cls + 1)
@@ -87,7 +87,7 @@ class Plug_play(nn.Module):
 
         sampled_protos = self.PrototypeSupportBank.sample_prototypes().to(hie_fea.device).detach()  # c k d
         random_proto_back = self.PrototypeSupportBank.gmm_means_0.unsqueeze(0)
-        global_proto_fore = self.PrototypeSupportBank.gmm_means_1.unsqueeze(0).repeat(1, self.n_components, 1)
+        global_proto_fore = self.PrototypeSupportBank.gmm_means_1.unsqueeze(0).expand(1, self.n_components, -1)
         global_proto = torch.cat([random_proto_back, global_proto_fore], dim=0)
 
         # proto_fea = rearrange(l2_normalize(self.proj_head(hie_fea)), 'b n d -> (b n) d')

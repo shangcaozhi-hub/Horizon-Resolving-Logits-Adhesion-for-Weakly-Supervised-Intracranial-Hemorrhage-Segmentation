@@ -1,74 +1,58 @@
-"""Collect weakly labeled patch features and rebuild the archived Gaussian banks."""
+"""Fit each class distribution after every bankful of new reliable features."""
 import torch
 from torch.nn import functional as F
-from network.GMM import GaussianMixture
+from scipy.optimize import linear_sum_assignment
+from sklearn.mixture import GaussianMixture
+from threadpoolctl import threadpool_limits
+
+
+def _fit(bank, cls, samples, previous_fits):
+    weights = getattr(bank, f"gmm_weights_{cls}")
+    means = getattr(bank, f"gmm_means_{cls}")
+    covs = getattr(bank, f"gmm_covariances_{cls}")
+    with threadpool_limits(limits=1):
+        mixture = GaussianMixture(n_components=len(weights), covariance_type="full",
+                                  init_params="kmeans", reg_covar=1e-3)
+        mixture.fit(samples.detach().cpu().double().numpy())
+    fresh = [torch.as_tensor(x, device=samples.device, dtype=samples.dtype)
+             for x in (mixture.weights_, mixture.means_, mixture.covariances_)]
+    if previous_fits:
+        # EM component labels are arbitrary. Match centers before averaging.
+        _, order = linear_sum_assignment(torch.cdist(means, fresh[1]).cpu().numpy())
+        indices = torch.as_tensor(order, device=samples.device)
+        fresh = [old.lerp(new[indices], 1 - bank.gamma)
+                 for old, new in zip((weights, means, covs), fresh)]
+    fresh[0] = fresh[0] / fresh[0].sum()
+    if not all(torch.isfinite(x).all() for x in fresh) or (fresh[0] <= 0).any():
+        raise FloatingPointError("Invalid fitted prototype distribution")
+    torch.linalg.cholesky(fresh[2])
+    for old, new in zip((weights, means, covs), fresh):
+        old.copy_(new)
 
 
 @torch.no_grad()
-def collect(bank, cam, features, targets, skull):
-    """Use high-CAM patches on positive slices and intracranial patches on negatives."""
-    inside = F.interpolate(skull.float(), size=cam.shape[-2:], mode="nearest").flatten(1).bool()
-    per_class = [[], []]
-    for values, scores, valid, positive in zip(features.detach(), cam.detach().flatten(1),
-                                                inside, targets.reshape(-1)):
-        indices = valid.nonzero().flatten()
-        if not indices.numel():
+def collect(bank, cam, features, targets, skull, threshold, capacity, fits):
+    """Append one random feature per eligible region and preserve batch overflow."""
+    spatial = cam.shape[-2:]
+    inside = F.interpolate(skull.float(), size=spatial, mode="nearest").flatten(1).bool()
+    activation = cam.detach().flatten(1).relu()
+    activation = activation / activation.amax(1, keepdim=True).clamp_min(1e-12)
+    positive = targets.reshape(-1, 1).bool()
+    regions = (inside & (activation == 0), inside & positive & (activation >= threshold))
+    for cls, region in enumerate(regions):
+        valid = region.any(1)
+        if not valid.any():
             continue
-        if positive.item() > 0:
-            eligible_scores = scores[indices]
-            span = eligible_scores.max() - eligible_scores.min()
-            if span <= 0:
-                continue
-            # Relative activation within the skull keeps the rule usable before calibration.
-            cutoff = eligible_scores.min() + 0.8 * span
-            indices = indices[eligible_scores >= cutoff]
-            cls = 1
-        else:
-            cls = 0
-        chosen = torch.randperm(indices.numel(), device=indices.device)[:32]
-        per_class[cls].append(values[indices[chosen]])
-    for cls, chunks in enumerate(per_class):
-        if not chunks:
-            continue
+        index = torch.multinomial(region[valid].float(), 1)
+        rows = valid.nonzero(as_tuple=True)[0]
+        samples = features[rows, index[:, 0]]
         queue = getattr(bank, f"queue{cls}")
-        count = getattr(bank, f"queue_ptr{cls}")
-        new = torch.cat(chunks)
-        recent = torch.cat((queue[:int(count)], new))[-len(queue):]
-        queue[:len(recent)].copy_(recent)
-        count.fill_(len(recent))
-
-
-@torch.no_grad()
-def rebuild(bank, minimum):
-    """Publish both fits together. Keep partial queues for the next epoch."""
-    if min(int(bank.queue_ptr0), int(bank.queue_ptr1)) < minimum:
-        return False
-    fitted = []
-    for cls in (0, 1):
-        queue = getattr(bank, f"queue{cls}")[:int(getattr(bank, f"queue_ptr{cls}"))]
-        components = getattr(bank, f"gmm_weights_{cls}").numel()
-        if components == 1:
-            mean = queue.mean(0, keepdim=True)
-            centered = queue - mean
-            cov = (centered.T @ centered / len(queue)).unsqueeze(0)
-            cov.diagonal(dim1=-2, dim2=-1).add_(1e-3)
-            weights = queue.new_ones(1)
-        else:
-            indices = torch.randperm(len(queue), device=queue.device)[:components]
-            gmm = GaussianMixture(components, queue.shape[1], eps=1e-3,
-                                  mu_init=queue[indices].unsqueeze(0)).to(queue.device)
-            gmm.fit(queue, n_iter=20)
-            weights = gmm.pi.reshape(-1)
-            weights = weights / weights.sum()
-            mean, cov = gmm.mu[0], gmm.var[0]
-        cov = (cov + cov.transpose(-1, -2)) * 0.5
-        if not (torch.isfinite(mean).all() and torch.isfinite(cov).all()
-                and torch.isfinite(weights).all() and (weights > 0).all()):
-            raise FloatingPointError("Invalid prototype fit")
-        torch.linalg.cholesky(cov)
-        fitted.append((weights, mean, cov))
-    for cls, params in enumerate(fitted):
-        for name, value in zip(("weights", "means", "covariances"), params):
-            getattr(bank, f"gmm_{name}_{cls}").copy_(value)
-        getattr(bank, f"queue_ptr{cls}").zero_()
-    return True
+        ptr = getattr(bank, f"queue_ptr{cls}")
+        start = int(ptr)
+        pending = torch.cat((queue[:start], samples))
+        while len(pending) >= capacity:
+            _fit(bank, cls, pending[:capacity], fits[cls])
+            fits[cls] += 1
+            pending = pending[capacity:]
+        queue[:len(pending)].copy_(pending)
+        ptr.fill_(len(pending))

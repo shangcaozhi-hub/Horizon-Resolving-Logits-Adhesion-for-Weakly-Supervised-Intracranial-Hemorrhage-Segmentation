@@ -25,8 +25,13 @@ def build_model(name, state=None):
         raise ValueError(f"Unknown model {name!r}")
     if state and all(key.startswith("module.") for key in state):
         state = {key[7:]: value for key, value in state.items()}
+    bank = "PrototypeSupportBank."
+    shape_args = {}
+    if name.startswith("horizon_") and state is not None:
+        shape_args = dict(components=state[bank + "gmm_means_0"].shape[0],
+                          foreground_components=state[bank + "gmm_means_1"].shape[0])
     if name == "horizon_spol":
-        model = Plug_play(num_cls=1, num_prototype=50, gamma=0.9, threshold=0.8)
+        model = Plug_play(num_cls=1, num_prototype=50, gamma=0.9, threshold=0.8, **shape_args)
     elif name == "horizon_swin" and state is None:
         model = PrototypeSwinTransformer(auxiliary_head=False)
     elif name == "horizon_swin":
@@ -36,7 +41,8 @@ def build_model(name, state=None):
         model = PrototypeSwinTransformer(
             auxiliary_head="classifier.weight" in state,
             bank_size=state[bank + "queue0"].shape[0],
-            components=state[bank + "gmm_means_0"].shape[0])
+            num_prototype=100 if shape_args["foreground_components"] == 1 else 50,
+            **shape_args)
     elif name == "swin_mil":
         model = SwinMIL(num_classes=1)
     else:

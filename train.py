@@ -1,5 +1,6 @@
 """Train the four hemorrhage models on RSNA PNG slices."""
 import argparse
+import math
 import os
 import random
 import tempfile
@@ -12,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from dataloader.datasets import RSNAClsDataset
 from models import MODELS, build_model, load_model
-from network.bank_training import collect, rebuild
+from network.bank_training import collect
 from training import batch_loss, compute_horizon_losses
 
 
@@ -22,9 +23,22 @@ def save_checkpoint(path, state):
         tmp = Path(stream.name)
     try:
         torch.save(state, tmp)
-        os.link(tmp, path)
+        if os.name == "nt":
+            # Windows rename publishes atomically and fails if path already exists.
+            os.rename(tmp, path)
+        else:
+            os.link(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def stage_learning_rate(epoch_index, duration, peak, floor):
+    """Two linear warm-up epochs, then a cosine from peak to floor."""
+    warmup_epochs = 2
+    if epoch_index < warmup_epochs:
+        return floor + (peak - floor) * epoch_index / warmup_epochs
+    progress = min((epoch_index - warmup_epochs) / (duration - warmup_epochs - 1), 1.)
+    return floor + (peak - floor) * (1. + math.cos(math.pi * progress)) / 2.
 
 
 def main():
@@ -36,15 +50,13 @@ def main():
     start = parser.add_mutually_exclusive_group()
     start.add_argument("--checkpoint", type=Path, help="Initialize from trusted project weights")
     start.add_argument("--resume", type=Path, help="Resume a checkpoint from this training entry")
-    parser.add_argument("--epochs", type=int, default=20, help="Total epochs including resumed epochs")
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=5e-5, help="Initial AdamW learning rate")
-    parser.add_argument("--bank-min", type=int, help="Minimum queued features per class to refit (default 256)")
+    parser.add_argument("--epochs", type=int, default=None, help="Total epochs including resumed epochs")
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--lr", type=float, help="Joint-training AdamW learning rate (default 5e-5)")
+    parser.add_argument("--bank-min", type=int, help="New features per class between fits (default 1000)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
-    if args.batch_size < 2 or args.epochs < 1 or args.lr <= 0:
-        parser.error("Use batch size >= 2, positive epochs and a positive learning rate.")
     device = torch.device(args.device)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -60,16 +72,37 @@ def main():
     else:
         model = build_model(args.model).to(device)
     model.train()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     horizon = args.model.startswith("horizon_")
-    online = horizon and not args.checkpoint
-    fits, steps, first_epoch = 0, 0, 1
-    minimum = args.bank_min if args.bank_min is not None else 256
+    online = saved["online"] if saved is not None else horizon and not args.checkpoint
+    config = saved.get("schedule", {}) if saved is not None else {}
+    warmup = config.get("classification_epochs", 10 if online else 0)
+    joint_lr = args.lr if args.lr is not None else config.get("joint_lr", 5e-5)
+    if args.batch_size is None:
+        args.batch_size = config.get("batch_size", 48)
+    if args.epochs is None:
+        args.epochs = warmup + 20
+    minimum = args.bank_min if args.bank_min is not None else config.get("capacity", 1000)
+    if args.batch_size < 2 or args.epochs < 1 or joint_lr <= 0:
+        parser.error("Use batch size >= 2, positive epochs and a positive learning rate.")
+    fits, steps, first_epoch = [0, 0], 0, 1
+    if saved is not None and len(saved["optimizer"]["param_groups"]) == 1:
+        parameters = model.parameters()
+    else:
+        decay, no_decay = [], []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                (no_decay if param.ndim == 1 or name.endswith(".bias") else decay).append(param)
+        parameters = [{"params": decay}, {"params": no_decay, "weight_decay": 0.0}]
+    optimizer = torch.optim.AdamW(parameters, lr=joint_lr, weight_decay=0.05)
     if saved is not None:
-        online, fits, steps = saved["online"], saved["bank_fits"], saved["steps"]
+        fits = saved.get("class_fits", [saved["bank_fits"]] * 2)
+        steps = saved["steps"]
         first_epoch = saved["epoch"] + 1
-        if args.bank_min is None:
-            minimum = saved["bank_min"]
+        if "schedule" not in saved:
+            # Earlier releases entered joint training as soon as both banks fitted.
+            warmup = 0 if min(fits) else warmup
+            if args.bank_min is None:
+                minimum = saved["bank_min"]
         optimizer.load_state_dict(saved["optimizer"])
         random.setstate(saved["python_rng"])
         np.random.set_state(saved["numpy_rng"])
@@ -90,6 +123,12 @@ def main():
         destination = args.output / f"epoch-{epoch:03d}.pth"
         if destination.exists():
             raise FileExistsError(destination)
+        if epoch <= warmup:
+            lr = stage_learning_rate(epoch - 1, warmup, 5e-4, 5e-5)
+        else:
+            lr = stage_learning_rate(epoch - warmup - 1, 20, joint_lr, min(1e-5, joint_lr))
+        for group in optimizer.param_groups:
+            group["lr"] = lr
         total, phase = 0., "classification"
         for image, target, skull in loader:
             image, target, skull = image.to(device), target.to(device), skull.to(device)
@@ -97,8 +136,12 @@ def main():
             if online:
                 view = model.cam_phase(image)
                 scores, cam, features, _, _ = view
-                collect(model.PrototypeSupportBank, cam, features, target, skull)
-                if fits:
+                collect(model.PrototypeSupportBank, cam, features, target, skull,
+                        model.threshold, minimum, fits)
+                if epoch > warmup and not min(fits):
+                    raise RuntimeError("Joint training requires both fitted banks. Check CAM regions, "
+                                       "slice labels and the number of eligible training examples.")
+                if epoch > warmup:
                     loss = compute_horizon_losses(model, image, target, skull, first_view=view)["loss"]
                     phase = "horizon"
                 else:
@@ -116,16 +159,16 @@ def main():
             optimizer.step()
             steps += 1
             total += loss.item()
-        if online:
-            fits += int(rebuild(model.PrototypeSupportBank, minimum))
         save_checkpoint(destination, dict(
             method=args.model, models=model.state_dict(), optimizer=optimizer.state_dict(),
-            epoch=epoch, steps=steps, online=online, bank_fits=fits, bank_min=minimum,
+            epoch=epoch, steps=steps, online=online, bank_fits=min(fits), bank_min=minimum, class_fits=fits,
+            schedule=dict(classification_epochs=warmup, joint_lr=joint_lr,
+                          batch_size=args.batch_size, capacity=minimum),
             torch_rng=torch.get_rng_state(), python_rng=random.getstate(), numpy_rng=np.random.get_state(),
             cuda_rng=torch.cuda.get_rng_state(device) if device.type == "cuda" else None))
-        print(f"epoch={epoch} steps={steps} phase={phase} mean_loss={total/len(loader):.5f} "
+        print(f"epoch={epoch} steps={steps} lr={lr:g} phase={phase} mean_loss={total/len(loader):.5f} "
               f"last_grad_norm={norm.item():.5g} bank_fits={fits} file={destination}", flush=True)
-    if online and fits == 0:
+    if online and not min(fits):
         print("Warm-up only: the queues still need foreground and background samples. "
               "Resume for more epochs; the checkpoint retains the collected features.")
 

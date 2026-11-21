@@ -7,9 +7,12 @@ from models import score_and_cam
 
 
 def _forward_view(model, image, view=None):
-    # Fine-tune from the archived bank. Sampling reads its fitted GMM buffers.
+    # Each view samples independently from the current fitted bank.
     scores, cam, features, foreground, above = model.cam_phase(image) if view is None else view
-    logits, similarity, _, proto_mask = model.proto_phase(features, cam)
+    logits, _, _, _ = model.proto_phase(features, cam)
+    logits = logits[:, :, :model.num_prototype]
+    similarity = logits.amax(-1).reshape(cam.size(0), *cam.shape[-2:], 2).permute(0, 3, 1, 2)
+    proto_mask = similarity[:, 1:2] > similarity[:, :1]
     if isinstance(scores, (list, tuple)):
         scores = scores[0]
     return scores, cam, logits, similarity, proto_mask, foreground, above
@@ -50,7 +53,8 @@ def compute_horizon_losses(model, image, label, skull_mask=None, flip_dims=None,
     positive_images = (label != 0).reshape(-1, 1, 1, 1)
     proto1 = proto1 & positive_images
     above1 = above1 & positive_images
-    uncertain1 = proto1 | above1
+    proto2 = proto2 & positive_images
+    above2 = above2 & positive_images
     options = dict(getattr(model, "ppc_options", {}))
     options["num_components"] = model.n_components
     if options.get("mode", "hard") == "weighted":
@@ -71,27 +75,27 @@ def compute_horizon_losses(model, image, label, skull_mask=None, flip_dims=None,
             sample_ppc(refined1, logits1, **options) +
             sample_ppc(refined2, logits1, **options))
 
-    abnormal = label == 1
-    # With any positive image, average spatial maxima over the entire batch.
-    bias = ((cam1 - uncertain1.float() * 1e3)[abnormal].amax(dim=(2, 3)).mean()
+    background = sim1[:, :1] > sim1[:, 1:2]
+    has_background = background.flatten(2).any(dim=2)[:, :, None, None]
+    bias = cam1.masked_fill(~background, -torch.inf).amax(dim=(2, 3), keepdim=True)
+    bias = torch.where(has_background, bias, torch.zeros_like(bias))
+    def relative_activation(reference):
+        shifted = (cam1 - reference).relu()
+        return shifted / shifted.amax(dim=(2, 3), keepdim=True).clamp_min(1e-5)
 
-            if abnormal.any() else cam1.new_zeros(()))
-    biased1 = _normalize_cam(cam1 - bias)
+    biased1 = relative_activation(bias)
 
     aligned_sim2 = torch.flip(sim2, flip_dims)
 
     proto_cam1 = _normalize_cam(sim1[:, 1:2] - sim1[:, :1])
     proto_cam2 = _normalize_cam(aligned_sim2[:, 1:2] - aligned_sim2[:, :1])
-    mask = (proto_cam1 > 0) & (proto_cam2 > 0)
-    cvc_loss = (proto_cam2 - proto_cam1).abs()[mask].mean() if mask.any() else proto_cam1.new_zeros(())
-    # cvc_loss = (proto_cam2 - proto_cam1).abs().mean() # + (biased2 - biased1).abs().mean()
-
-    positive_mask = positive_images.reshape(-1).bool()
+    cvc_loss = (proto_cam2 - proto_cam1).abs().mean()
+    positive_mask = (positive_images & has_background).reshape(-1)
 
     # normal forward: bias participates in gradient
     q_live = biased1[positive_mask]
     # same forward value, but bias gradient is blocked
-    biased1_stop_bias = _normalize_cam(cam1 - bias.detach())
+    biased1_stop_bias = relative_activation(bias.detach())
     q_stop = biased1_stop_bias[positive_mask]
     # prototype supervision
     p = proto_cam1[positive_mask].detach()

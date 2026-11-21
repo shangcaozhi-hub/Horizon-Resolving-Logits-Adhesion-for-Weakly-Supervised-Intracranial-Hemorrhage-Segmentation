@@ -13,8 +13,8 @@ def sample_ppc(label, logits, *, mode="hard", temperature=0.1,
     """Choose pseudo-label hard mining or label-free weighted PPC.
 
     logits: [pixels, 2, prototypes]. All prototypes are treated alike regardless
-    of their origin for negative sampling. The last num_components scores are
-    center similarities: background positives use their max, foreground their mean.
+    of their origin for negative sampling. Hard mining uses the strongest background anchor and averages
+    foreground losses across sampled hemorrhage anchors.
     foreground_positive is accepted for compatibility but no longer selects targets.
     Sampling probabilities select floor(probability * candidate_count) uniformly
     without replacement (at least one pixel for a positive pixel probability).
@@ -121,8 +121,9 @@ def sample_ppc(label, logits, *, mode="hard", temperature=0.1,
             rows = torch.cat((random_rows, hard_rows))
 
         values = logits[rows].float()
-        centers = values[:, cls, -num_components:]
-        positive = values[:, cls].amax(-1) if cls == 0 else centers.mean(-1)
+        positives = values[:, cls]
+        if cls == 0:
+            positives = positives.amax(-1, keepdim=True)
         opposite = values[:, 1 - cls]
 
         random_negative_count = int(num_prototypes * negative_sample_prob)
@@ -140,9 +141,9 @@ def sample_ppc(label, logits, *, mode="hard", temperature=0.1,
         if negatives.shape[1] == 0:
             continue
 
-        contrasts = torch.cat((positive[:, None], negatives), dim=-1)
-        targets = torch.zeros(rows.numel(), dtype=torch.long, device=device)
-        class_losses.append(F.cross_entropy(contrasts / temperature, targets))
+        # Average the loss across foreground anchors (Eq. 8).
+        negative_log_sum = torch.logsumexp(negatives / temperature, dim=-1, keepdim=True)
+        class_losses.append(F.softplus(negative_log_sum - positives / temperature).mean())
 
     return (torch.stack(class_losses).mean() if class_losses
             else logits.reshape(-1)[:0].sum())

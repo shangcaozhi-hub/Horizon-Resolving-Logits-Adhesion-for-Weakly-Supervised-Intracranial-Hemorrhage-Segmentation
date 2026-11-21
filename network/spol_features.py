@@ -124,7 +124,7 @@ class clusterSupportBank(nn.Module):
 
 
 class PrototypeSupportBank(nn.Module):
-    def __init__(self, feat_dim, bank_size, num_classes, num_prototypes, gamma, num_components=3):
+    def __init__(self, feat_dim, bank_size, num_classes, num_prototypes, gamma, num_components=5, foreground_components=5):
         super(PrototypeSupportBank, self).__init__()
         self.feat_dim = feat_dim
         self.bank_size = bank_size
@@ -143,7 +143,7 @@ class PrototypeSupportBank(nn.Module):
             self.init_flag.append(True)
 
             if i == 1:
-                num_component = 1
+                num_component = foreground_components
             else:
                 num_component = num_components
 
@@ -351,7 +351,7 @@ class PrototypeSupportBank(nn.Module):
 
 
 class SPOL_pretrain(nn.Module):
-    def __init__(self, num_cls=1, num_prototype=50, gamma=0.9, threshold=None):
+    def __init__(self, num_cls=1, num_prototype=50, gamma=0.9, threshold=None, components=5, foreground_components=5):
         super(SPOL_pretrain, self).__init__()
         self.num_cls = num_cls
         self.threshold = threshold
@@ -394,24 +394,24 @@ class SPOL_pretrain(nn.Module):
         # self.ln = nn.LayerNorm(387)
 
         if threshold == None:
-            self.PrototypeSupportBank_05 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
-            self.PrototypeSupportBank_06 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
-            self.PrototypeSupportBank_07 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
-            self.PrototypeSupportBank_08 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
-            self.PrototypeSupportBank_09 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
+            self.PrototypeSupportBank_05 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
+            self.PrototypeSupportBank_06 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
+            self.PrototypeSupportBank_07 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
+            self.PrototypeSupportBank_08 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
+            self.PrototypeSupportBank_09 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
             self.clusterSupportBank = clusterSupportBank(320, 1000, 50)
         elif threshold == 0.9:
-            self.PrototypeSupportBank_09 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
+            self.PrototypeSupportBank_09 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
         elif threshold == 0.8:
-            self.PrototypeSupportBank_08 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
+            self.PrototypeSupportBank_08 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
         elif threshold == 0.7:
-            self.PrototypeSupportBank_07 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
+            self.PrototypeSupportBank_07 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
         elif threshold == 0.6:
-            self.PrototypeSupportBank_06 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
+            self.PrototypeSupportBank_06 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
         elif threshold == 0.5:
-            self.PrototypeSupportBank_05 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
+            self.PrototypeSupportBank_05 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
         elif threshold == 0.99:
-            self.PrototypeSupportBank_099 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma)
+            self.PrototypeSupportBank_099 = PrototypeSupportBank(320, 1000, self.num_cls + 1, num_prototype, gamma, components, foreground_components)
         elif threshold == 0.1:
             self.clusterSupportBank = clusterSupportBank(320, 1000, 50)
 

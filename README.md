@@ -79,17 +79,25 @@ For a full INSTANCE list, replace `joytest.txt` with your list relative to the d
 
 Prepare one grayscale PNG per slice and a `train.csv` with the image stem in the first column and the binary hemorrhage label in the second. For example, a row beginning with `ID_001,1` refers to `ID_001.png`. Keep each patient in one split. The manuscript clips raw CT to 0–100 HU and applies min–max normalization before resizing. The training loader reads prepared PNGs and applies spatial and intensity augmentation. Its skull mask is derived from image intensity. Lesion contours are used for evaluation.
 
-```sh
-python train.py --model horizon_spol --images data/RSNA/pngs --lists data/RSNA/lists --output runs/horizon_spol --epochs 20
-```
-
-Select any model from the table with `--model`. Both baselines optimize slice-level binary cross-entropy. For Horizon, training begins with classification while the model collects labeled-slice features. After the first successful bank fit, the next epoch activates prototype contrast, cross-view consistency and PAM-to-RAM self-distillation. Training logs report the phase and cumulative number of bank fits.
-
-**Manuscript and release settings.** Section 4.2 of the manuscript uses a batch size of 48, ten classification warm-up epochs at $5\times10^{-4}$ and twenty joint-training epochs at $5\times10^{-5}$. It describes five-component distributions per class. The release’s scratch trainer defaults to a batch size of 8 and AdamW at $5\times10^{-5}$. It collects up to 32 intracranial features per slice, using high-CAM locations on positive slices and background locations on negative slices. At epoch boundaries it fits a background mixture and a single foreground Gaussian once each queue has at least 256 samples by default. The release loss also aggregates per-image background references across positive slices in a batch. Use these settings when interpreting a new training run alongside the manuscript results.
-
-**Fine-tuning and resuming.** Supply `--checkpoint` to start a new fine-tuning run from fitted weights with a fixed prototype bank. To continue a run interrupted after epoch 5, restore its model, optimizer, prototype queues and random-generator states using the training checkpoint. Here `--epochs 20` sets the total target epoch count.
+From the repository root, start Horizon-SPOL with randomly initialized weights and empty prototype banks. Use `--model horizon_swin` for the same protocol with a Swin backbone.
 
 ```sh
-python train.py --model horizon_spol --checkpoint weights/horizon_spol_weights.pth --images data/RSNA/pngs --lists data/RSNA/lists --output runs/finetune
-python train.py --model horizon_spol --resume runs/horizon_spol/epoch-005.pth --images data/RSNA/pngs --lists data/RSNA/lists --output runs/horizon_spol --epochs 20
+python train.py --model horizon_spol --images data/RSNA/pngs --lists data/RSNA/lists --output runs/horizon_spol
 ```
+
+| Epochs | Objective | Peak AdamW learning rate | Batch size |
+| --- | --- | --- | --- |
+| 1-10 | Slice-level binary classification | 5e-4 | 48 |
+| 11-30 | Classification, asymmetric prototype contrast, cross-view consistency and PAM-to-RAM self-distillation | 5e-5 | 48 |
+
+Each stage starts its own two-epoch linear learning-rate warm-up. The classification stage starts at 5e-5, reaches 5e-4 in epoch 3 and decays by cosine to 5e-5 in epoch 10. Joint training restarts at 1e-5 in epoch 11, reaches 5e-5 in epoch 13 and decays by cosine to 1e-5 in epoch 30. Resuming uses the saved epoch to continue the same curve.
+
+During both stages, each slice can contribute one intracranial feature per eligible region. A positive slice supplies a foreground candidate where the normalized CAM is at least 0.8. Zero-CAM locations supply background candidates. Each class fits a five-component full-covariance GMM by K-means initialization and EM after every 1,000 new features. Subsequent fits update the parameters with momentum 0.9. Each view draws 50 prototypes per class. Both banks must have fitted before joint training starts. Epoch logs include the phase, learning rate and fit counts in background/foreground order.
+
+Training checkpoints include the model, partial banks, per-class fit counts, AdamW state, stage settings and random-generator states. To resume after epoch 5 and finish the default 30 epochs:
+
+```sh
+python train.py --model horizon_spol --resume runs/horizon_spol/epoch-005.pth --images data/RSNA/pngs --lists data/RSNA/lists --output runs/horizon_spol
+```
+
+For fine-tuning, `--checkpoint weights/horizon_spol_weights.pth` starts joint optimization with the supplied fitted bank held fixed. The `spol` and `swin_mil` baselines use slice-level classification throughout. Use `--epochs` to override the total epoch count.

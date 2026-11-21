@@ -6,7 +6,24 @@ from sklearn.mixture import GaussianMixture
 from threadpoolctl import threadpool_limits
 
 
-def _fit(bank, cls, samples, previous_fits):
+def _merge_spol_moments(old, new, gamma, previous_fits):
+    """Merge aligned components by their exponentially weighted first two moments."""
+    weights, means, covs = old
+    new_weights, new_means, new_covs = new
+    # Normalize the finite history 1, gamma, ..., gamma ** previous_fits.
+    new_share = (1 - gamma) / (1 - gamma ** (previous_fits + 1))
+    new_mass = new_share * new_weights
+    total_mass = (1 - new_share) * weights + new_mass
+    alpha = (new_mass / total_mass)[:, None]
+    delta = new_means - means
+    mean = means + alpha * delta
+    fraction = alpha.unsqueeze(-1)
+    drift = delta.unsqueeze(-1) * delta.unsqueeze(-2)
+    covariance = covs.lerp(new_covs, fraction) + fraction * (1 - fraction) * drift
+    return [total_mass, mean, covariance]
+
+
+def _fit(bank, cls, samples, previous_fits, *, merge_moments=False):
     weights = getattr(bank, f"gmm_weights_{cls}")
     means = getattr(bank, f"gmm_means_{cls}")
     covs = getattr(bank, f"gmm_covariances_{cls}")
@@ -20,8 +37,12 @@ def _fit(bank, cls, samples, previous_fits):
         # EM component labels are arbitrary. Match centers before averaging.
         _, order = linear_sum_assignment(torch.cdist(means, fresh[1]).cpu().numpy())
         indices = torch.as_tensor(order, device=samples.device)
-        fresh = [old.lerp(new[indices], 1 - bank.gamma)
-                 for old, new in zip((weights, means, covs), fresh)]
+        fresh = [value[indices] for value in fresh]
+        old = (weights, means, covs)
+        if merge_moments:
+            fresh = _merge_spol_moments(old, fresh, bank.gamma, previous_fits)
+        else:
+            fresh = [prior.lerp(new, 1 - bank.gamma) for prior, new in zip(old, fresh)]
     fresh[0] = fresh[0] / fresh[0].sum()
     if not all(torch.isfinite(x).all() for x in fresh) or (fresh[0] <= 0).any():
         raise FloatingPointError("Invalid fitted prototype distribution")
@@ -69,7 +90,7 @@ def collect_spol(bank, cam, features, targets, skull, threshold, capacity, fits)
 
     if int(bank.queue_ptr1) > capacity:
         for cls in (0, 1):
-            _fit(bank, cls, getattr(bank, f"queue{cls}")[:capacity], fits[cls])
+            _fit(bank, cls, getattr(bank, f"queue{cls}")[:capacity], fits[cls], merge_moments=True)
             fits[cls] += 1
             getattr(bank, f"queue_ptr{cls}").zero_()
 

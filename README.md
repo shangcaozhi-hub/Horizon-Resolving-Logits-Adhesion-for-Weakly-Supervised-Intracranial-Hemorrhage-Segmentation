@@ -63,7 +63,7 @@ SHA-256: `79b65f2c328fe817896777c3147afb019e4f874657a05b64f67f58684b5d5994`
    python -m pip install -r requirements.txt
    ```
 
-2. Use the included [ten-slice manifest](data/INSTANCE/joytest.txt). It selects one annotated hemorrhage-positive slice from each of ten patients. Place the matching INSTANCE HDF5 files under `data/INSTANCE/data/slices/`. Each file must contain the `image` and `label` arrays. If you already have the prepared joytest folder, point `--data-root` to that folder instead.
+2. The [joytest manifest](data/INSTANCE/joytest.txt) lists ten hemorrhage-positive INSTANCE slices from ten patients. The [bundled HDF5 inputs](data/INSTANCE/data/slices/) each contain the CT image and its reference mask (`image` and `label`). The command below reads them directly.
 
 3. Run inference. Use a new output directory for each run.
 

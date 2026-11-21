@@ -53,8 +53,6 @@ Table 2 reports patient-volume Dice as mean ± standard deviation over four inde
 
 The release includes the Horizon-SPOL weights at `weights/horizon_spol_weights.pth` (100.67 MiB). This PyTorch state dictionary contains the learned parameters and fitted prototype bank.
 
-SHA-256: `79b65f2c328fe817896777c3147afb019e4f874657a05b64f67f58684b5d5994`
-
 ## Test Horizon-SPOL on ten positive INSTANCE slices
 
 1. From the repository root, install the dependencies in a Python 3.9 environment.

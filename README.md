@@ -89,4 +89,3 @@ For the other rows of [Table 2](#results-reported-in-the-manuscript), set `--mod
 
 - **Dice.** Rectify and max-normalize each slice CAM, resize it to the reference mask grid and apply the selected threshold. Suppress predictions on slices with a negative classification logit. Stack the slices in anatomical order and compute Dice per patient, then average across patients within each test set.
 - **LAI.** On hemorrhage-positive slices, use the reference masks to collect raw spatial logits for lesion and background locations. Estimate their densities and report the area of overlap as a percentage.
-- **Across runs.** Train and evaluate each model with four distinct seeds. For each test set, report the mean and standard deviation of the four run-level Dice scores.

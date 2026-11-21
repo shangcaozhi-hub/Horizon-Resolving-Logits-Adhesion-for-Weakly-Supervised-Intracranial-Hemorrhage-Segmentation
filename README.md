@@ -79,7 +79,7 @@ For a full INSTANCE list, replace `joytest.txt` with your list relative to the d
 
 Prepare one grayscale PNG per slice and a `train.csv` with the image stem in the first column and the binary hemorrhage label in the second. For example, a row beginning with `ID_001,1` refers to `ID_001.png`. Keep each patient in one split. The manuscript clips raw CT to 0–100 HU and applies min–max normalization before resizing. The training loader reads prepared PNGs and applies spatial and intensity augmentation. Its skull mask is derived from image intensity. Lesion contours are used for evaluation.
 
-From the repository root, start Horizon-SPOL with randomly initialized weights and empty prototype banks. Use `--model horizon_swin` for the same protocol with a Swin backbone.
+From the repository root, start Horizon-SPOL with randomly initialized weights and empty prototype banks. Use `--model horizon_swin` for the same learning-rate schedule with a Swin backbone.
 
 ```sh
 python train.py --model horizon_spol --images data/RSNA/pngs --lists data/RSNA/lists --output runs/horizon_spol
@@ -92,7 +92,9 @@ python train.py --model horizon_spol --images data/RSNA/pngs --lists data/RSNA/l
 
 Each stage starts its own two-epoch linear learning-rate warm-up. The classification stage starts at 5e-5, reaches 5e-4 in epoch 3 and decays by cosine to 5e-5 in epoch 10. Joint training restarts at 1e-5 in epoch 11, reaches 5e-5 in epoch 13 and decays by cosine to 1e-5 in epoch 30. Resuming uses the saved epoch to continue the same curve.
 
-During both stages, each slice can contribute one intracranial feature per eligible region. A positive slice supplies a foreground candidate where the normalized CAM is at least 0.8. Zero-CAM locations supply background candidates. Each class fits a five-component full-covariance GMM by K-means initialization and EM after every 1,000 new features. Subsequent fits update the parameters with momentum 0.9. Each view draws 50 prototypes per class. Both banks must have fitted before joint training starts. Epoch logs include the phase, learning rate and fit counts in background/foreground order.
+Horizon-SPOL pools candidates across the first view of the batch. It samples 1% of eligible foreground locations and 1% of intracranial background locations without replacement, rounding down with a minimum of one per nonempty region. Foreground requires a positive slice and normalized CAM of at least 0.8; background requires zero CAM. The background queue also receives an equal quota of zero-CAM locations outside the skull mask, limited by availability. If a class has no candidates, it repeats its queue head (initially zero). When the foreground insertion count exceeds 1,000, both five-component full-covariance GMMs are fitted to their latest 1,000 queue entries and both counters restart. Repeated entries count toward this threshold.
+
+Horizon-Swin samples one feature per eligible intracranial region per slice and refits each class independently after 1,000 new features. Both models initialize each GMM fit by K-means and run EM. Subsequent fits update the parameters with momentum 0.9. Each view draws 50 prototypes per class. Both banks must have fitted before joint training starts. Epoch logs include the phase, learning rate and fit counts in background/foreground order.
 
 Training checkpoints include the model, partial banks, per-class fit counts, AdamW state, stage settings and random-generator states. To resume after epoch 5 and finish the default 30 epochs:
 

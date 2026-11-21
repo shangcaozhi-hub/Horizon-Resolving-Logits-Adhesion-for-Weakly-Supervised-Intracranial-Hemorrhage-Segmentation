@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from dataloader.datasets import RSNAClsDataset
 from models import MODELS, build_model, load_model
-from network.bank_training import collect
+from network.bank_training import collect, collect_spol
 from training import batch_loss, compute_horizon_losses
 
 
@@ -53,7 +53,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=None, help="Total epochs including resumed epochs")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--lr", type=float, help="Joint-training AdamW learning rate (default 5e-5)")
-    parser.add_argument("--bank-min", type=int, help="New features per class between fits (default 1000)")
+    parser.add_argument("--bank-min", type=int, help="Feature count threshold for prototype fits (default 1000)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -74,6 +74,7 @@ def main():
     model.train()
     horizon = args.model.startswith("horizon_")
     online = saved["online"] if saved is not None else horizon and not args.checkpoint
+    collect_features = collect_spol if args.model == "horizon_spol" else collect
     config = saved.get("schedule", {}) if saved is not None else {}
     warmup = config.get("classification_epochs", 10 if online else 0)
     joint_lr = args.lr if args.lr is not None else config.get("joint_lr", 5e-5)
@@ -103,6 +104,13 @@ def main():
             warmup = 0 if min(fits) else warmup
             if args.bank_min is None:
                 minimum = saved["bank_min"]
+        if online and args.model == "horizon_spol" and not config.get("rolling_spol_bank"):
+            bank = model.PrototypeSupportBank
+            for cls in (0, 1):
+                queue = getattr(bank, f"queue{cls}")
+                count = int(getattr(bank, f"queue_ptr{cls}"))
+                queue[:count].copy_(queue[:count].flip(0))
+                queue[count:].zero_()
         optimizer.load_state_dict(saved["optimizer"])
         random.setstate(saved["python_rng"])
         np.random.set_state(saved["numpy_rng"])
@@ -136,8 +144,8 @@ def main():
             if online:
                 view = model.cam_phase(image)
                 scores, cam, features, _, _ = view
-                collect(model.PrototypeSupportBank, cam, features, target, skull,
-                        model.threshold, minimum, fits)
+                collect_features(model.PrototypeSupportBank, cam, features, target, skull,
+                                 model.threshold, minimum, fits)
                 if epoch > warmup and not min(fits):
                     raise RuntimeError("Joint training requires both fitted banks. Check CAM regions, "
                                        "slice labels and the number of eligible training examples.")
@@ -163,7 +171,8 @@ def main():
             method=args.model, models=model.state_dict(), optimizer=optimizer.state_dict(),
             epoch=epoch, steps=steps, online=online, bank_fits=min(fits), bank_min=minimum, class_fits=fits,
             schedule=dict(classification_epochs=warmup, joint_lr=joint_lr,
-                          batch_size=args.batch_size, capacity=minimum),
+                          batch_size=args.batch_size, capacity=minimum,
+                          rolling_spol_bank=online and args.model == "horizon_spol"),
             torch_rng=torch.get_rng_state(), python_rng=random.getstate(), numpy_rng=np.random.get_state(),
             cuda_rng=torch.cuda.get_rng_state(device) if device.type == "cuda" else None))
         print(f"epoch={epoch} steps={steps} lr={lr:g} phase={phase} mean_loss={total/len(loader):.5f} "

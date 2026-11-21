@@ -1,4 +1,4 @@
-"""Fit each class distribution after every bankful of new reliable features."""
+"""Collect prototype features and fit the distributions used by Horizon."""
 import torch
 from torch.nn import functional as F
 from scipy.optimize import linear_sum_assignment
@@ -30,15 +30,55 @@ def _fit(bank, cls, samples, previous_fits):
         old.copy_(new)
 
 
-@torch.no_grad()
-def collect(bank, cam, features, targets, skull, threshold, capacity, fits):
-    """Append one random feature per eligible region and preserve batch overflow."""
+def _candidate_masks(cam, targets, skull, threshold):
     spatial = cam.shape[-2:]
     inside = F.interpolate(skull.float(), size=spatial, mode="nearest").flatten(1).bool()
     activation = cam.detach().flatten(1).relu()
     activation = activation / activation.amax(1, keepdim=True).clamp_min(1e-12)
     positive = targets.reshape(-1, 1).bool()
-    regions = (inside & (activation == 0), inside & positive & (activation >= threshold))
+    zero = activation == 0
+    return inside & zero, inside & positive & (activation >= threshold), ~inside & zero
+
+
+def _draw_indices(mask, quota=None):
+    indices = mask.flatten().nonzero(as_tuple=True)[0]
+    if quota is None:
+        quota = max(1, indices.numel() // 100)
+    order = torch.randperm(indices.numel(), device=indices.device)
+    return indices[order[:quota]]
+
+
+@torch.no_grad()
+def collect_spol(bank, cam, features, targets, skull, threshold, capacity, fits):
+    """Sample across the batch and refit both rolling queues on the foreground clock."""
+    background, foreground, black = _candidate_masks(cam, targets, skull, threshold)
+    values = features.reshape(-1, features.size(-1))
+    for cls, region in enumerate((background, foreground)):
+        indices = _draw_indices(region)
+        queue = getattr(bank, f"queue{cls}")
+        if indices.numel():
+            if cls == 0:
+                extra = _draw_indices(black, indices.numel())
+                indices = torch.cat((indices, extra))
+            samples = values[indices]
+        else:
+            samples = queue[:1]
+        # Keep the first new sample at the head for the empty-class fallback.
+        queue[:capacity].copy_(torch.cat((samples, queue[:capacity]))[:capacity])
+        getattr(bank, f"queue_ptr{cls}").add_(len(samples))
+
+    if int(bank.queue_ptr1) > capacity:
+        for cls in (0, 1):
+            _fit(bank, cls, getattr(bank, f"queue{cls}")[:capacity], fits[cls])
+            fits[cls] += 1
+            getattr(bank, f"queue_ptr{cls}").zero_()
+
+
+@torch.no_grad()
+def collect(bank, cam, features, targets, skull, threshold, capacity, fits):
+    """Append one random feature per eligible region and preserve batch overflow."""
+    background, foreground, _ = _candidate_masks(cam, targets, skull, threshold)
+    regions = (background, foreground)
     for cls, region in enumerate(regions):
         valid = region.any(1)
         if not valid.any():

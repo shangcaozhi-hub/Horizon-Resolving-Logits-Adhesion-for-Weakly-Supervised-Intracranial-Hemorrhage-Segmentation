@@ -59,7 +59,7 @@ For a full INSTANCE list, replace `joytest.txt` with your list relative to the d
 
 ## Train on RSNA
 
-Keep all slices from a patient in the same split. Clip CT intensities to 0-100 HU, apply min-max normalization and save one grayscale PNG per slice in `data/RSNA/pngs/`. In `data/RSNA/lists/train.csv`, the first two columns give the image stem and the slice-level label (1 for any hemorrhage, 0 otherwise).
+**1. Prepare RSNA.** Use the RSNA 2019 intracranial hemorrhage dataset. Split by patient (70% training, 30% classification validation). Clip CT intensities to 0-100 HU, min-max normalize and save one grayscale PNG per slice in `data/RSNA/pngs/`. In `data/RSNA/lists/train.csv`, list only training slices. The first column is the filename without `.png`; the second is 1 if any hemorrhage subtype is present and 0 otherwise.
 
 ```csv
 Image,any
@@ -67,19 +67,34 @@ ID_001,1
 ID_002,0
 ```
 
-Run the following command from the repository root. The loader augments each training slice and converts it to a 240 x 240 three-channel input.
+**2. Train a model.** From the repository root, install the [requirements](requirements.txt) in a Python 3.9 environment and run:
 
 ```sh
-python train.py --model horizon_spol --images data/RSNA/pngs --lists data/RSNA/lists --output runs/horizon_spol
+python -m pip install -r requirements.txt
+python train.py --model horizon_spol --images data/RSNA/pngs --lists data/RSNA/lists --seed 42 --output runs/horizon_spol/seed42
 ```
 
-Horizon trains from scratch with AdamW and a batch size of 48. Each stage starts with two warm-up epochs followed by cosine decay.
+Horizon starts from random weights. It trains with AdamW and batches of 48 slices. Each stage begins with two learning-rate warm-up epochs followed by cosine decay.
 
-| Epochs | Objective | Peak learning rate | Minimum learning rate |
+| Epochs | Training objective | Peak LR | Minimum LR |
 | --- | --- | --- | --- |
-| 1-10 | Slice classification | 5e-4 | 5e-5 |
-| 11-30 | Classification, prototype contrast, cross-view consistency and self-distillation | 5e-5 | 1e-5 |
+| 1-10 | Learn slice classification and collect features for the prototype bank | 5e-4 | 5e-5 |
+| 11-30 | Train jointly on two views with classification, prototype contrast, consistency and self-distillation | 5e-5 | 1e-5 |
 
-During the first ten epochs, the classifier learns to detect hemorrhage from slice labels while the model builds its prototype bank. Joint training then uses the augmented slice and a flipped copy as its two views. Their prototype activation maps guide the classifier toward consistent lesion responses across views.
+For the other rows of [Table 2](#results-reported-in-the-manuscript), set `--model` to `horizon_swin`, `spol` or `swin_mil`. The two baselines use classification throughout. Give each model and seed its own output directory. The trainer saves `epoch-NNN.pth` after every epoch. To continue the example from epoch 6, add `--resume runs/horizon_spol/seed42/epoch-005.pth`.
 
-For the Swin backbone, use `--model horizon_swin` and a separate output directory. The trainer saves a checkpoint after each epoch. To continue from epoch 6, rerun the command above with `--resume runs/horizon_spol/epoch-005.pth`. This restores the model, optimizer and prototype bank.
+**3. Evaluate on INSTANCE and BHSD.** Supply the full datasets and patient-level split lists in the [inference formats above](#other-inference-inputs). The following example exports raw CAMs using the final Horizon-SPOL checkpoint. Use the same checkpoint for all three commands and a new output directory for each export.
+
+```sh
+python predict.py --model horizon_spol --checkpoint runs/horizon_spol/seed42/epoch-030.pth --data-root data/INSTANCE --list val_slices.txt --format npz --output outputs/seed42/instance-val
+python predict.py --model horizon_spol --checkpoint runs/horizon_spol/seed42/epoch-030.pth --data-root data/INSTANCE --list test_slices.txt --format npz --output outputs/seed42/instance-test
+python predict.py --model horizon_spol --checkpoint runs/horizon_spol/seed42/epoch-030.pth --dataset bhsd --data-root data/BHSD --list data_2D.txt --format npz --output outputs/seed42/bhsd-test
+```
+
+Each NPZ contains the slice identifier (`case`), classification logit (`score`) and raw spatial logits (`cam`). To compare with Table 2:
+
+- **Dice.** Select a CAM threshold on the held-out INSTANCE validation patients (30%). Apply that threshold to the remaining INSTANCE patients and the full BHSD test set. Rectify and max-normalize each slice CAM, resize it to the mask grid and suppress predictions on slices with a negative classification logit. Stack slices in anatomical order and compute Dice per patient. Report the mean patient Dice for each run.
+- **LAI.** On hemorrhage-positive slices, use the reference masks to collect raw spatial logits for lesion and background locations. Estimate the two densities and integrate their pointwise minimum. Report the overlap as a percentage.
+- **Across runs.** Repeat training and evaluation with four distinct seeds per model. Report Dice as the mean and standard deviation of the four run means.
+
+The public repository provides training and CAM export. Exact regeneration of the published table also requires the original patient lists, run-specific checkpoints or model-selection records, and volume-level Dice and LAI evaluation code. The bundled ten-slice joytest is a quick inference check.
